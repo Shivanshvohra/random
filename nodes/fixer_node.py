@@ -11,12 +11,12 @@ import google.generativeai as genai
 # === Gemini Configuration ===
 genai.configure(api_key=os.getenv("GEMINI_API_KEY", "AIzaSyDt-QChgdH6i64MACm1vvROAFHqBIOo-30"))
 model = genai.GenerativeModel(
-    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash",
     generation_config={
         "temperature": 0.1,
         "top_p": 0.8,
         "top_k": 40,
-        "max_output_tokens": 2000,
+        "max_output_tokens": 4000,
     },
 )
 

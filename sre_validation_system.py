@@ -7,23 +7,23 @@ All validation nodes, models, LLM service, and workflow logic in one file.
 
 Usage:
     from sre_validation_system import validate_code_with_llm
-    
+
     result = validate_code_with_llm(
         original_code="buggy code",
-        fixed_code="fixed code", 
+        fixed_code="fixed code",
         original_error="error message",
         change_context="what was changed"
     )
-    
+
     print(f"Decision: {result['decision']}")
 """
 
 import os
 import json
+import time
 from typing import TypedDict, List, Literal, Optional
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage
+import google.generativeai as genai
 from langgraph.graph import StateGraph, START, END
 
 # Load environment variables
@@ -62,53 +62,88 @@ class LLMService:
     """Service for interacting with Gemini AI"""
 
     def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY","AIzaSyDt-QChgdH6i64MACm1vvROAFHqBIOo-30")
+        api_key = os.getenv("GOOGLE_API_KEY","AIzaSyBZy2N1wvslhylOlsVsUphv4CBV3siyTx0")
         if not api_key:
             raise ValueError("GOOGLE_API_KEY environment variable is required")
 
-        self.llm = ChatGoogleGenerativeAI(
-            model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
-            google_api_key=api_key,
-            temperature=0.1,
-            max_tokens=4000,
-            transport="rest"  # Use REST instead of gRPC to avoid auth issues
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(
+            os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 4000,
+            }
         )
 
     def invoke_with_json_response(self, prompt: str) -> dict:
-        """Invoke LLM and parse JSON response with error handling"""
-        try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
+        """Invoke LLM and parse JSON response with error handling and rate limiting"""
+        max_retries = 3
+        base_delay = 5  # seconds
 
-            # Clean up response (remove markdown formatting if present)
-            content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+        for attempt in range(max_retries):
+            try:
+                # # Add delay between requests to avoid rate limiting
+                # if attempt > 0:
+                #     delay = base_delay * (2 ** attempt)  # exponential backoff
+                #     print(f"⏳ Rate limit delay: {delay}s (attempt {attempt + 1})")
+                #     time.sleep(delay)
 
-            # Extract just the JSON part (find first { to last })
-            start = content.find('{')
-            end = content.rfind('}') + 1
-            if start != -1 and end > start:
-                content = content[start:end]
+                response = self.model.generate_content(prompt)
 
-            # Parse JSON
-            return json.loads(content)
+                # Clean up response (remove markdown formatting if present)
+                content = response.text.strip()
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
 
-        except json.JSONDecodeError as e:
-            print(f"JSON parsing error: {e}")
-            print(f"Raw response: {content}")
-            # Return a fallback structure
-            return {
-                "error": "Failed to parse LLM response",
-                "raw_response": content
-            }
-        except Exception as e:
-            print(f"LLM invocation error: {e}")
-            return {
-                "error": f"LLM call failed: {str(e)}"
-            }
+                # Extract just the JSON part (find first { to last })
+                start = content.find('{')
+                end = content.rfind('}') + 1
+                if start != -1 and end > start:
+                    content = content[start:end]
+
+                # Parse JSON
+                return json.loads(content)
+
+            except Exception as e:
+                error_msg = str(e).lower()
+
+                # Handle rate limiting specifically
+                if "429" in error_msg or "quota" in error_msg or "rate limit" in error_msg:
+                    if attempt < max_retries - 1:
+                        delay = 60  # Wait longer for rate limits
+                        print(f"⚠️ Rate limit hit, waiting {delay}s before retry...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        return {
+                            "error": "Rate limit exceeded",
+                            "raw_response": "Rate limit error"
+                        }
+
+                # Handle JSON parsing errors
+                if "json" in error_msg.lower():
+                    print(f"JSON parsing error: {e}")
+                    try:
+                        print(f"Raw response: {content}")
+                    except:
+                        pass
+                    return {
+                        "error": "Failed to parse LLM response",
+                        "raw_response": str(e)
+                    }
+
+                # Handle other errors
+                print(f"LLM invocation error: {e}")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    return {
+                        "error": f"LLM call failed: {str(e)}"
+                    }
 
 # =============================================================================
 # VALIDATION NODES (6 AI AGENTS)
@@ -452,7 +487,7 @@ ANALYSIS SUMMARY:
 def create_sre_validation_workflow():
     """
     Creates the main LangGraph workflow for SRE validation.
-    
+
     WORKFLOW STEPS:
     1. Analyze original error (understand what went wrong)
     2. Analyze code differences (what changed)
@@ -494,13 +529,13 @@ def create_sre_validation_workflow():
 def validate_code_with_llm(original_code: str, fixed_code: str, original_error: str, change_context: str):
     """
     Main validation function - this replaces your Spring Boot validation logic.
-    
+
     Args:
         original_code: The code that had the error
         fixed_code: The fixed/modified code
         original_error: Description of the original error
         change_context: Context about what was changed
-    
+
     Returns:
         Complete validation result with decision
     """
